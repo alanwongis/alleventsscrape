@@ -1,3 +1,4 @@
 /.idea/
 /venv/
 /scrape.log
+/allevents_events.json

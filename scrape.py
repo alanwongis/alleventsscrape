@@ -10,20 +10,19 @@
 import json
 import logging
 import pprint
-import re
-import time
+import datetime
 
 import requests
 from bs4 import BeautifulSoup
 
 START_PAGE_NUM = 1
-MAX_RESULTS = 10
+MAX_RESULTS = 30
 MAX_SEARCH_PAGES = 60  # set this to the max pages to scan on Eventbrite
 SEARCH_URLS = [
     "https://www.allevents.in"]
 
 # filtering events uses keywords to decide to which events are car related events
-# However some only contain keywords which are ambiguous (e.g. "Cruise in Chigago") which
+# However some only contain keywords which are ambiguous (e.g. "Cruise in Chicago") which
 # could be car related "Cruise down the Boulevard" vs "Cruise down the Mississippi"
 # Until we implement better filter or have a way top curate the results, we'll
 # exclude these items
@@ -65,18 +64,6 @@ save_raw_dump = False  # flag to save the raw scrape
 logging.basicConfig(filename='scrape.log', level=logging.WARNING)
 
 
-def _get(endpoint):
-    try:
-        response = requests.get(endpoint, headers=my_headers, timeout=10)
-        response.raise_for_status()
-        # process response
-        data = response.json()
-        pprint.pprint(data)
-        return data
-    except requests.exceptions.HTTPError as errh:
-        print(errh)
-
-
 def get_page(url, n):
     # get the html for the page n of the search
     response = requests.get(url + str(n))
@@ -86,14 +73,79 @@ def get_page(url, n):
 
 
 def parse_event_from_html(soup):
-    head = soup.find_all(_class="event-head")
-    desc = soup.find_all(_class="event-description")
-    tick = soup.find_all(_class="event-external-tickets")
+    head = soup.find_all(class_="event-head")[-1]
+    desc = soup.find_all(class_="event-description-html")[0]
+    # ticket = soup.find_all(class_="event-external-tickets")[0]
+    location = soup.find_all(class_="full-venue")[0]
+    thumb = soup.find_all(class_="event-thumb")[0]
+
+    name = head.find_all("h1")[0].text
+    pprint.pprint(name)
+    description = desc.text.strip(" \n\t")
+
+    location_lines = location.text.strip(" \n\t").split(",")
+    country = location_lines[-1]
+    address = location_lines[0]
+
+    img_url = soup.find_all(class_="event-banner-image")[0]['src']
+    img_vars = img_url.split("/")[-1].split("-")
+    img_width = "0"
+    img_height = "0"
+    for v in img_vars:
+        if v.startswith("w"):
+            img_width = v[1:]
+        if v.startswith("h"):
+            img_height = v[1:]
+
+    date_span = soup("i", class_="icon-time mr5")[0].find_next_sibling("span").find("span")
+    start_date = datetime.datetime.fromtimestamp(float(date_span["data-stime"])).strftime("%Y-%m-%dT%H:%M:%S")
+    end_date = datetime.datetime.fromtimestamp(float(date_span["data-etime"])).strftime("%Y-%m-%dT%H:%M:%S")
+    time_zone = date_span["data-tz"]
+
+    event = {
+        "name": name,
+        "description": description,
+        "bookingUrl": None,
+        "eventType": None,
+        "address": {
+            "addressLineOne": address,
+            "addressLineTwo": "",
+            "addressLineThree": "",
+            "city": "",
+            "state": "",
+            "country": country,
+            "geolocation": {
+                "latitude": "",
+                "longitude": ""
+            }
+        },
+        "coverImage": {
+            "url": img_url,
+            "width": img_width,
+            "height": img_height,
+            "thumbnail": thumb["src"],
+            "caption": "",
+            "mediaType": "img"
+        },
+        "price": {
+            "currency": None,
+            "value": None
+        },
+        "startDate": start_date,
+        "endDate": end_date,
+        "maximumNumberOfAvailableSpots": None,
+        "webex": None,
+        "socialMedias": [
+            {
+                "url": None,
+                "socialMediaType": None
+            }
+        ]
+    }
+    return event
 
 
-
-
-def parse_event_from_json(js):
+def parse_event_from_json(raw_ev):
     # some processing..
     img_url = raw_ev["image"]
     img_vars = img_url.split("/")[-1].split("-")
@@ -154,6 +206,7 @@ def parse_event_from_json(js):
     }
     return event
 
+
 def parse_event_details_page(url):
     soup = BeautifulSoup(requests.get(url).text, features='html.parser')
     json_scripts = soup.find_all(attrs={"type": "application/ld+json"})
@@ -161,13 +214,14 @@ def parse_event_details_page(url):
     raw_jsn = None
     for sc in json_scripts:
         jsn = json.loads(sc.text)
-        if jsn["@type"].lower().find("event") >=0:
+        if jsn["@type"].lower().find("event") >= 0:
             raw_jsn = jsn
 
     if raw_jsn is None:
         logging.warning("cannot find json event data on page: "+url)
+        print("cannot find json event data")
         return parse_event_from_html(soup)
-    else: # parse the json
+    else:  # parse the json
         return parse_event_from_json(raw_jsn)
 
 
@@ -175,7 +229,7 @@ def parse_events(soup):
     event_divs = soup.find_all(class_="item event-item box-link")
     events = []
 
-    for n, ev_div  in enumerate(event_divs[:min(len(event_divs), MAX_RESULTS)]):
+    for n, ev_div in enumerate(event_divs[:min(len(event_divs), MAX_RESULTS)]):
         ev_url = ev_div['data-link'].split("?")[0]
         print(n + 1, ev_url)
         event = parse_event_details_page(ev_url)
@@ -198,15 +252,12 @@ def main():
     json.dump(events, events_file)
 
 
-
 def test():
-    soup = BeautifulSoup(requests.get("https://allevents.in/florham%20park/car-show/10000407546772367").text)
-    print(parse_event_from_html(soup))
+    url = "https://allevents.in/midland/harmony-home-car-show-bear-fundraiser/200023226374040"
+    soup = BeautifulSoup(requests.get(url).text, features='html.parser')
+    pprint.pprint(parse_event_from_html(soup))
+
 
 if __name__ == "__main__":
-    #main()
-    test()
-
-
-
-
+    main()
+    #test()
